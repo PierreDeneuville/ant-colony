@@ -1,0 +1,1040 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Ant Colony Simulator</title>
+    <style>
+        body {
+            margin: 0;
+            display: flex;
+            background: #333;
+            color: white;
+            font-family: Arial;
+        }
+        
+        #game-container {
+            display: flex;
+            padding: 20px;
+            gap: 20px;
+            width: 100%;
+        }
+        
+        #game-canvas {
+            border: 2px solid #666;
+            background: #234523;
+        }
+        
+        #stats-panel {
+            min-width: 200px;
+            padding: 10px;
+            background: #444;
+            border-radius: 8px;
+        }
+        
+        .stat {
+            margin: 10px 0;
+            padding: 5px;
+            border-bottom: 1px solid #555;
+        }
+        
+        #title-display {
+            font-size: 1.2em;
+            color: gold;
+            margin-top: 20px;
+            text-align: center;
+        }
+        
+        #season-display {
+            text-align: center;
+            font-size: 1.1em;
+            margin: 10px 0;
+            padding: 5px;
+            background: #555;
+            border-radius: 4px;
+        }
+
+        .game-effect {
+            position: absolute;
+            font-weight: bold;
+            pointer-events: none;
+            animation: floatAndFade 1.5s forwards;
+        }
+
+        .combat-effect {
+            color: #EF5350;
+        }
+
+        .food-effect {
+            color: #4CAF50;
+        }
+
+        .birth-effect {
+            color: #BA68C8;
+        }
+
+        @keyframes floatAndFade {
+            0% { 
+                opacity: 1;
+                transform: translateY(0);
+            }
+            100% { 
+                opacity: 0;
+                transform: translateY(-30px);
+            }
+        }
+    </style>
+</head>
+<body>
+    <div id="game-container">
+        <canvas id="game-canvas"></canvas>
+        <div id="stats-panel">
+            <div id="season-display">Été - Jour 1</div>
+            <div class="stat">Fourmis: <span id="ant-count">0</span></div>
+            <div class="stat">- Ouvrières: <span id="worker-count">0</span></div>
+            <div class="stat">- Guerrières: <span id="warrior-count">0</span></div>
+            <div class="stat">- Reines: <span id="queen-count">1</span></div>
+            <div class="stat">Nourriture: <span id="food-count">100</span></div>
+            <div class="stat">Température: <span id="temperature">25°C</span></div>
+            <div id="title-display">Colonie Naissante</div>
+        </div>
+    </div>
+
+    <script>
+        // Configuration du jeu
+        const config = {
+            antSize: 4,
+            mapSize: 800,
+            maxAnts: 1000,
+            dayDuration: 20000,
+            seasonDuration: 4 * 20000,
+            foodConsumptionRate: 0.001,
+            baseReproductionRate: 0.02,
+            baseMortalityRate: 0.0001,
+            nestRadius: 50,
+            tempUpdateInterval: 2000,
+            predatorSpeed: 1.5,
+            predatorDamage: 0.5,
+            warriorDamage: 0.2,
+            maxPredators: 3,
+            forageRadius: 150,
+            maxObstacles: 10,
+            obstacleTransitionDuration: 5000, // Durée de transition pour les obstacles
+            queensPerHundred: 1, // Nombre de reines par centaine de fourmis
+        };
+
+        // États du jeu
+        let gameState = {
+            ants: [],
+            foods: [],
+            predators: [],
+            obstacles: [],
+            day: 1,
+            seasonIndex: 0,
+            temperature: 25,
+            totalFood: 200,
+            lastTimeUpdate: Date.now(),
+            lastTempUpdate: Date.now(),
+            dayProgress: 0,
+            effects: [], // Pour les animations
+            queenPosition: { x: config.mapSize / 2, y: config.mapSize / 2 },
+            requiredQueens: 1, // Nombre de reines requises basé sur la population
+            seasonColors: {
+                "Printemps": { ground: '#2D5A27', accent: '#8BC34A' },
+                "Été": { ground: '#234523', accent: '#4CAF50' },
+                "Automne": { ground: '#2A3B23', accent: '#FF9800' },
+                "Hiver": { ground: '#1A2F1A', accent: '#B0BEC5' }
+            },
+            titles: [
+                {name: "Colonie Naissante", threshold: 0},
+                {name: "Colonie Émergente", threshold: 50},
+                {name: "Colonie Prospère", threshold: 100},
+                {name: "Empire des Fourmis", threshold: 200}
+            ]
+        };
+
+        const seasons = ["Printemps", "Été", "Automne", "Hiver"];
+
+        // Initialisation du canvas
+        const canvas = document.getElementById('game-canvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = config.mapSize;
+        canvas.height = config.mapSize;
+
+        // Fonction utilitaire pour les effets
+        function addEffect(x, y, text, type) {
+            const effect = document.createElement('div');
+            effect.className = `game-effect ${type}-effect`;
+            effect.style.left = `${x + canvas.offsetLeft}px`;
+            effect.style.top = `${y + canvas.offsetTop}px`;
+            effect.textContent = text;
+            document.body.appendChild(effect);
+            setTimeout(() => effect.remove(), 1500);
+        }
+
+        // Classes Obstacle et Animation
+        class Obstacle {
+            constructor(x, y, size) {
+                this.x = x;
+                this.y = y;
+                this.size = size;
+                this.opacity = 0;
+                this.type = Math.random() < 0.5 ? 'branch' : 'rock';
+                this.transitionStart = Date.now();
+                this.appearing = true;
+            }
+
+            update() {
+                const elapsed = Date.now() - this.transitionStart;
+                const progress = Math.min(1, elapsed / config.obstacleTransitionDuration);
+                
+                if (this.appearing) {
+                    this.opacity = progress;
+                } else {
+                    this.opacity = 1 - progress;
+                }
+
+                return this.opacity > 0;
+            }
+
+            draw(ctx) {
+                ctx.globalAlpha = this.opacity;
+                if (this.type === 'branch') {
+                    ctx.fillStyle = '#8B4513';
+                    ctx.fillRect(this.x - this.size/2, this.y - this.size/4, this.size, this.size/2);
+                } else {
+                    ctx.fillStyle = '#808080';
+                    ctx.beginPath();
+                    ctx.arc(this.x, this.y, this.size/2, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+                ctx.globalAlpha = 1;
+            }
+
+            contains(x, y) {
+                if (this.type === 'branch') {
+                    return x >= this.x - this.size/2 && 
+                           x <= this.x + this.size/2 && 
+                           y >= this.y - this.size/4 && 
+                           y <= this.y + this.size/4;
+                } else {
+                    const distance = Math.sqrt(
+                        Math.pow(x - this.x, 2) + 
+                        Math.pow(y - this.y, 2)
+                    );
+                    return distance <= this.size/2;
+                }
+            }
+        }
+
+        // Fonction pour vérifier les collisions
+        function checkCollision(x, y) {
+            return gameState.obstacles.some(obstacle => 
+                obstacle.opacity > 0.5 && obstacle.contains(x, y)
+            );
+        }
+        class Ant {
+        constructor(x, y, type = "worker") {
+            this.x = x;
+            this.y = y;
+            this.type = type;
+            this.targetX = x;
+            this.targetY = y;
+            this.speed = 2;
+            this.age = 0;
+            this.color = type === "worker" ? "#FFB74D" :
+                        type === "warrior" ? "#EF5350" :
+                        "#BA68C8";
+            this.health = 100;
+            this.state = "idle";
+            this.lastForageTime = Date.now();
+            this.combatTarget = null;
+            this.foodCollected = 0;
+            this.birthCooldown = 0;
+            
+            // Points de passage pour contourner les obstacles
+            this.waypoints = [];
+        }
+
+        distanceToNest() {
+            return Math.sqrt(
+                Math.pow(this.x - gameState.queenPosition.x, 2) + 
+                Math.pow(this.y - gameState.queenPosition.y, 2)
+            );
+        }
+
+        findPathTo(targetX, targetY) {
+            // Réinitialiser les waypoints
+            this.waypoints = [];
+            
+            // Si pas d'obstacle sur le chemin direct, pas besoin de waypoints
+            const directPath = !this.pathHasObstacle(this.x, this.y, targetX, targetY);
+            if (directPath) {
+                this.targetX = targetX;
+                this.targetY = targetY;
+                return;
+            }
+
+            // Sinon, trouver un chemin contournant l'obstacle
+            const angle = Math.atan2(targetY - this.y, targetX - this.x);
+            const distance = Math.sqrt(
+                Math.pow(targetX - this.x, 2) + 
+                Math.pow(targetY - this.y, 2)
+            );
+
+            // Essayer de trouver un point de passage en testant différents angles
+            for (let offset of [30, -30, 45, -45, 60, -60]) {
+                const radOffset = (offset * Math.PI) / 180;
+                const testAngle = angle + radOffset;
+                const testDistance = distance * 0.6;
+                
+                const waypointX = this.x + Math.cos(testAngle) * testDistance;
+                const waypointY = this.y + Math.sin(testAngle) * testDistance;
+
+                if (!this.pathHasObstacle(this.x, this.y, waypointX, waypointY) &&
+                    !this.pathHasObstacle(waypointX, waypointY, targetX, targetY)) {
+                    this.waypoints.push({x: waypointX, y: waypointY});
+                    break;
+                }
+            }
+
+            // Si un waypoint a été trouvé, le définir comme cible
+            if (this.waypoints.length > 0) {
+                this.targetX = this.waypoints[0].x;
+                this.targetY = this.waypoints[0].y;
+            } else {
+                // Si aucun chemin n'est trouvé, essayer une direction aléatoire
+                const randomAngle = Math.random() * Math.PI * 2;
+                this.targetX = this.x + Math.cos(randomAngle) * 20;
+                this.targetY = this.y + Math.sin(randomAngle) * 20;
+            }
+        }
+
+        pathHasObstacle(startX, startY, endX, endY) {
+            // Vérifier plusieurs points le long du chemin
+            const steps = 10;
+            for (let i = 0; i <= steps; i++) {
+                const t = i / steps;
+                const x = startX + (endX - startX) * t;
+                const y = startY + (endY - startY) * t;
+                if (checkCollision(x, y)) return true;
+            }
+            return false;
+        }
+
+        update() {
+            const inNest = this.distanceToNest() < config.nestRadius;
+
+            // Gestion de la reproduction pour les reines
+            if (this.type === "queen" && this.birthCooldown <= 0) {
+                if (gameState.totalFood > 50 && gameState.ants.length < config.maxAnts) {
+                    const reproductionRate = config.baseReproductionRate * 
+                        (seasons[gameState.seasonIndex] === "Printemps" ? 1.5 : 1);
+
+                    if (Math.random() < reproductionRate) {
+                        const newAntType = Math.random() < 0.2 ? "warrior" : "worker";
+                        const offsetX = (Math.random() * 40 - 20);
+                        const offsetY = (Math.random() * 40 - 20);
+                        
+                        gameState.ants.push(new Ant(
+                            this.x + offsetX,
+                            this.y + offsetY,
+                            newAntType
+                        ));
+                        
+                        addEffect(this.x, this.y, "Nouvelle fourmi!", "birth");
+                        gameState.totalFood -= 2;
+                        this.birthCooldown = 100; // Délai avant la prochaine naissance
+                    }
+                }
+            }
+            this.birthCooldown = Math.max(0, this.birthCooldown - 1);
+
+            // Mise à jour selon l'état
+            switch(this.state) {
+                case "idle":
+                    if (this.type === "worker" && 
+                        Date.now() - this.lastForageTime > 5000 && 
+                        !inNest) {
+                        this.findNearestFood();
+                    }
+                    break;
+                    
+                case "foraging":
+                    if (this.hasReachedTarget()) {
+                        if (this.waypoints.length > 0) {
+                            // Passer au prochain waypoint
+                            this.waypoints.shift();
+                            if (this.waypoints.length > 0) {
+                                this.targetX = this.waypoints[0].x;
+                                this.targetY = this.waypoints[0].y;
+                            }
+                        } else {
+                            this.collectFood();
+                            this.returnToNest();
+                        }
+                    }
+                    break;
+                    
+                case "fighting":
+                    if (this.type === "warrior") {
+                        this.updateCombat();
+                    }
+                    break;
+                    
+                case "returning":
+                    if (this.hasReachedTarget()) {
+                        if (this.waypoints.length > 0) {
+                            this.waypoints.shift();
+                            if (this.waypoints.length > 0) {
+                                this.targetX = this.waypoints[0].x;
+                                this.targetY = this.waypoints[0].y;
+                            }
+                        } else {
+                            this.state = "idle";
+                            this.lastForageTime = Date.now();
+                        }
+                    }
+                    break;
+            }
+
+            // Déplacement de base
+            const dx = this.targetX - this.x;
+            const dy = this.targetY - this.y;
+            const distance = Math.sqrt(dx * dx + dy * dy);
+            
+            if (distance > 2) {
+                this.x += (dx / distance) * this.speed;
+                this.y += (dy / distance) * this.speed;
+            }
+
+            // Vieillissement avec protection dans le nid
+            if (inNest) {
+                this.age += 0.5;
+            } else {
+                this.age++;
+            }
+
+            // Les guerrières cherchent des prédateurs
+            if (this.type === "warrior" && !this.combatTarget && Math.random() < 0.1) {
+                this.findNearestPredator();
+            }
+        }
+
+        findNearestFood() {
+            const nearestFood = gameState.foods
+                .filter(food => 
+                    Math.sqrt(
+                        Math.pow(this.x - food.x, 2) + 
+                        Math.pow(this.y - food.y, 2)
+                    ) < config.forageRadius
+                )
+                .sort((a, b) => 
+                    Math.sqrt(Math.pow(this.x - a.x, 2) + Math.pow(this.y - a.y, 2)) -
+                    Math.sqrt(Math.pow(this.x - b.x, 2) + Math.pow(this.y - b.y, 2))
+                )[0];
+
+            if (nearestFood) {
+                this.findPathTo(nearestFood.x, nearestFood.y);
+                this.state = "foraging";
+            }
+        }
+
+        hasReachedTarget() {
+            return Math.sqrt(
+                Math.pow(this.x - this.targetX, 2) + 
+                Math.pow(this.y - this.targetY, 2)
+            ) < 5;
+        }
+
+        returnToNest() {
+            const targetX = gameState.queenPosition.x + (Math.random() * 40 - 20);
+            const targetY = gameState.queenPosition.y + (Math.random() * 40 - 20);
+            this.findPathTo(targetX, targetY);
+            this.state = "returning";
+        }
+
+        collectFood() {
+            const foodIndex = gameState.foods.findIndex(food => 
+                Math.sqrt(
+                    Math.pow(this.x - food.x, 2) + 
+                    Math.pow(this.y - food.y, 2)
+                ) < 10
+            );
+
+            if (foodIndex !== -1) {
+                gameState.totalFood += 20;
+                this.foodCollected += 20;
+                addEffect(this.x, this.y, "+20 nourriture", "food");
+                gameState.foods.splice(foodIndex, 1);
+            }
+        }
+
+        // [Reste des méthodes de la classe Ant identiques...]
+        findNearestPredator() {
+            const nearestPredator = gameState.predators
+                .filter(pred => 
+                    Math.sqrt(
+                        Math.pow(this.x - pred.x, 2) + 
+                        Math.pow(this.y - pred.y, 2)
+                    ) < 150
+                )
+                .sort((a, b) => 
+                    Math.sqrt(Math.pow(this.x - a.x, 2) + Math.pow(this.y - a.y, 2)) -
+                    Math.sqrt(Math.pow(this.x - b.x, 2) + Math.pow(this.y - b.y, 2))
+                )[0];
+
+            if (nearestPredator) {
+                this.combatTarget = nearestPredator;
+                this.state = "fighting";
+            }
+        }
+
+        updateCombat() {
+            if (this.combatTarget && this.combatTarget.health > 0) {
+                const distance = Math.sqrt(
+                    Math.pow(this.x - this.combatTarget.x, 2) + 
+                    Math.pow(this.y - this.combatTarget.y, 2)
+                );
+
+                if (distance < 10) {
+                    this.combatTarget.health -= config.warriorDamage;
+                    addEffect(this.x, this.y, "-" + config.warriorDamage, "combat");
+                    
+                    if (this.combatTarget.health <= 0) {
+                        gameState.predators = gameState.predators
+                            .filter(p => p !== this.combatTarget);
+                        this.combatTarget = null;
+                        this.state = "idle";
+                        addEffect(this.x, this.y, "Prédateur vaincu!", "combat");
+                    }
+                } else {
+                    this.findPathTo(this.combatTarget.x, this.combatTarget.y);
+                }
+            } else {
+                this.combatTarget = null;
+                this.state = "idle";
+            }
+        }
+
+        draw(ctx) {
+            ctx.fillStyle = this.color;
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, config.antSize, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = "black";
+            ctx.lineWidth = 1;
+            ctx.stroke();
+
+            if (this.speed > 0 && (this.x !== this.targetX || this.y !== this.targetY)) {
+                const angle = Math.atan2(this.targetY - this.y, this.targetX - this.x);
+                ctx.beginPath();
+                ctx.moveTo(this.x, this.y);
+                ctx.lineTo(
+                    this.x + Math.cos(angle) * (config.antSize + 2),
+                    this.y + Math.sin(angle) * (config.antSize + 2)
+                );
+                ctx.strokeStyle = this.color;
+                ctx.stroke();
+            }
+        }
+    }
+    class Food {
+        constructor(x, y, amount = 100) {
+            this.x = x;
+            this.y = y;
+            this.amount = amount;
+            this.pulsePhase = Math.random() * Math.PI * 2;
+        }
+
+        draw(ctx) {
+            // Animation de pulsation
+            const pulse = Math.sin(this.pulsePhase + Date.now() / 500) * 0.2 + 1;
+            
+            ctx.fillStyle = "#4CAF50";
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, 5 * pulse, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = "#2E7D32";
+            ctx.lineWidth = 1;
+            ctx.stroke();
+        }
+    }
+
+    class Predator {
+        constructor(x, y) {
+            this.x = x;
+            this.y = y;
+            this.targetX = x;
+            this.targetY = y;
+            this.targetAnt = null;
+            this.speed = config.predatorSpeed;
+            this.health = 100;
+            this.waypoints = [];
+        }
+
+        findPathTo(targetX, targetY) {
+            // Même logique de pathfinding que pour les fourmis
+            this.waypoints = [];
+            
+            if (!this.pathHasObstacle(this.x, this.y, targetX, targetY)) {
+                this.targetX = targetX;
+                this.targetY = targetY;
+                return;
+            }
+
+            const angle = Math.atan2(targetY - this.y, targetX - this.x);
+            const distance = Math.sqrt(
+                Math.pow(targetX - this.x, 2) + 
+                Math.pow(targetY - this.y, 2)
+            );
+
+            for (let offset of [30, -30, 45, -45, 60, -60]) {
+                const radOffset = (offset * Math.PI) / 180;
+                const testAngle = angle + radOffset;
+                const testDistance = distance * 0.6;
+                
+                const waypointX = this.x + Math.cos(testAngle) * testDistance;
+                const waypointY = this.y + Math.sin(testAngle) * testDistance;
+
+                if (!this.pathHasObstacle(this.x, this.y, waypointX, waypointY) &&
+                    !this.pathHasObstacle(waypointX, waypointY, targetX, targetY)) {
+                    this.waypoints.push({x: waypointX, y: waypointY});
+                    break;
+                }
+            }
+
+            if (this.waypoints.length > 0) {
+                this.targetX = this.waypoints[0].x;
+                this.targetY = this.waypoints[0].y;
+            } else {
+                const randomAngle = Math.random() * Math.PI * 2;
+                this.targetX = this.x + Math.cos(randomAngle) * 20;
+                this.targetY = this.y + Math.sin(randomAngle) * 20;
+            }
+        }
+
+        pathHasObstacle(startX, startY, endX, endY) {
+            const steps = 10;
+            for (let i = 0; i <= steps; i++) {
+                const t = i / steps;
+                const x = startX + (endX - startX) * t;
+                const y = startY + (endY - startY) * t;
+                if (checkCollision(x, y)) return true;
+            }
+            return false;
+        }
+
+        update() {
+            // Éviter la zone du nid
+            const distanceToNest = Math.sqrt(
+                Math.pow(this.x - gameState.queenPosition.x, 2) + 
+                Math.pow(this.y - gameState.queenPosition.y, 2)
+            );
+
+            if (distanceToNest < config.nestRadius + 20) {
+                const angle = Math.atan2(
+                    this.y - gameState.queenPosition.y,
+                    this.x - gameState.queenPosition.x
+                );
+                this.targetX = this.x + Math.cos(angle) * 20;
+                this.targetY = this.y + Math.sin(angle) * 20;
+                this.waypoints = [];
+                return;
+            }
+
+            // Chercher une cible
+            if (!this.targetAnt || !gameState.ants.includes(this.targetAnt)) {
+                const possibleTargets = gameState.ants.filter(ant => 
+                    ant.type !== "queen" && 
+                    Math.sqrt(
+                        Math.pow(this.x - ant.x, 2) + 
+                        Math.pow(this.y - ant.y, 2)
+                    ) > config.nestRadius
+                );
+                
+                if (possibleTargets.length > 0) {
+                    this.targetAnt = possibleTargets.reduce((closest, ant) => {
+                        const distToCurrent = Math.sqrt(
+                            Math.pow(this.x - ant.x, 2) + 
+                            Math.pow(this.y - ant.y, 2)
+                        );
+                        const distToClosest = Math.sqrt(
+                            Math.pow(this.x - closest.x, 2) + 
+                            Math.pow(this.y - closest.y, 2)
+                        );
+                        return distToCurrent < distToClosest ? ant : closest;
+                    });
+                    this.findPathTo(this.targetAnt.x, this.targetAnt.y);
+                }
+            }
+
+            // Suivre la cible
+            if (this.targetAnt) {
+                const distance = Math.sqrt(
+                    Math.pow(this.x - this.targetAnt.x, 2) + 
+                    Math.pow(this.y - this.targetAnt.y, 2)
+                );
+                
+                if (distance > 50) {
+                    this.findPathTo(this.targetAnt.x, this.targetAnt.y);
+                }
+
+                if (distance < 5 && this.targetAnt.type !== "warrior") {
+                    gameState.ants = gameState.ants.filter(ant => ant !== this.targetAnt);
+                    addEffect(this.x, this.y, "Fourmi tuée!", "combat");
+                    this.targetAnt = null;
+                }
+            }
+
+            // Déplacement
+            if (this.targetX !== undefined && this.targetY !== undefined) {
+                const dx = this.targetX - this.x;
+                const dy = this.targetY - this.y;
+                const distance = Math.sqrt(dx * dx + dy * dy);
+                
+                if (distance > 2) {
+                    this.x += (dx / distance) * this.speed;
+                    this.y += (dy / distance) * this.speed;
+                } else if (this.waypoints.length > 0) {
+                    this.waypoints.shift();
+                    if (this.waypoints.length > 0) {
+                        this.targetX = this.waypoints[0].x;
+                        this.targetY = this.waypoints[0].y;
+                    }
+                }
+            }
+        }
+
+        draw(ctx) {
+            // Corps du prédateur
+            ctx.fillStyle = "#8B0000";
+            ctx.beginPath();
+            ctx.moveTo(this.x, this.y - 8);
+            ctx.lineTo(this.x - 8, this.y + 8);
+            ctx.lineTo(this.x + 8, this.y + 8);
+            ctx.closePath();
+            ctx.fill();
+            
+            // Contour
+            ctx.strokeStyle = "black";
+            ctx.stroke();
+
+            // Barre de vie
+            const healthBarWidth = 20;
+            const healthBarHeight = 3;
+            ctx.fillStyle = "#333";
+            ctx.fillRect(this.x - healthBarWidth/2, this.y - 12, healthBarWidth, healthBarHeight);
+            ctx.fillStyle = "red";
+            ctx.fillRect(
+                this.x - healthBarWidth/2, 
+                this.y - 12, 
+                (this.health/100) * healthBarWidth, 
+                healthBarHeight
+            );
+        }
+    }
+
+    // Gestionnaire d'événements pour le canvas
+    canvas.addEventListener('click', (e) => {
+        const rect = canvas.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+        
+        gameState.ants.forEach(ant => {
+            if (ant.type !== "queen") {
+                ant.findPathTo(
+                    x + (Math.random() * 40 - 20),
+                    y + (Math.random() * 40 - 20)
+                );
+                ant.state = "idle";
+            }
+        });
+    });
+    function updateStats() {
+        const antCount = gameState.ants.length;
+        document.getElementById('ant-count').textContent = antCount;
+        document.getElementById('worker-count').textContent = 
+            gameState.ants.filter(a => a.type === "worker").length;
+        document.getElementById('warrior-count').textContent = 
+            gameState.ants.filter(a => a.type === "warrior").length;
+        document.getElementById('queen-count').textContent = 
+            gameState.ants.filter(a => a.type === "queen").length;
+        document.getElementById('food-count').textContent = 
+            Math.max(0, Math.floor(gameState.totalFood));
+
+        // Mise à jour de la température à intervalle défini
+        const currentTime = Date.now();
+        if (currentTime - gameState.lastTempUpdate >= config.tempUpdateInterval) {
+            const baseTemp = {
+                "Printemps": 20,
+                "Été": 30,
+                "Automne": 15,
+                "Hiver": 5
+            }[seasons[gameState.seasonIndex]];
+            
+            gameState.temperature = baseTemp + Math.random() * 5 - 2.5;
+            document.getElementById('temperature').textContent = 
+                `${Math.round(gameState.temperature)}°C`;
+            gameState.lastTempUpdate = currentTime;
+        }
+        
+        // Mise à jour du titre
+        const currentTitle = gameState.titles
+            .filter(t => t.threshold <= antCount)
+            .pop();
+        document.getElementById('title-display').textContent = currentTitle.name;
+
+        // Gestion du nombre de reines requis
+        const newRequiredQueens = Math.max(1, Math.floor(antCount / 100));
+        if (newRequiredQueens !== gameState.requiredQueens) {
+            gameState.requiredQueens = newRequiredQueens;
+            adjustQueenCount();
+        }
+    }
+
+    function adjustQueenCount() {
+        const currentQueens = gameState.ants.filter(a => a.type === "queen");
+        const queenCount = currentQueens.length;
+
+        if (queenCount > gameState.requiredQueens) {
+            // Retirer des reines en excès (sauf la première)
+            const queensToRemove = currentQueens.slice(1).slice(0, queenCount - gameState.requiredQueens);
+            queensToRemove.forEach(queen => {
+                const index = gameState.ants.indexOf(queen);
+                if (index > -1) {
+                    gameState.ants.splice(index, 1);
+                    addEffect(queen.x, queen.y, "Reine perdue!", "combat");
+                }
+            });
+        } else if (queenCount < gameState.requiredQueens) {
+            // Ajouter de nouvelles reines
+            const mainQueen = currentQueens[0];
+            for (let i = 0; i < gameState.requiredQueens - queenCount; i++) {
+                const angle = Math.random() * Math.PI * 2;
+                const distance = config.nestRadius * 0.5;
+                const newQueen = new Ant(
+                    mainQueen.x + Math.cos(angle) * distance,
+                    mainQueen.y + Math.sin(angle) * distance,
+                    "queen"
+                );
+                gameState.ants.push(newQueen);
+                addEffect(newQueen.x, newQueen.y, "Nouvelle reine!", "birth");
+            }
+        }
+    }
+
+    // Gestion du temps et des saisons
+    function updateTimeAndSeason() {
+        const currentTime = Date.now();
+        const deltaTime = currentTime - gameState.lastTimeUpdate;
+        gameState.lastTimeUpdate = currentTime;
+
+        gameState.dayProgress += deltaTime;
+        if (gameState.dayProgress >= config.dayDuration) {
+            gameState.day++;
+            gameState.dayProgress = 0;
+
+            if (gameState.day % 4 === 0) {
+                gameState.seasonIndex = (gameState.seasonIndex + 1) % 4;
+                updateObstacles();
+            }
+        }
+
+        document.getElementById('season-display').textContent = 
+            `${seasons[gameState.seasonIndex]} - Jour ${gameState.day}`;
+    }
+
+    // Gestion des obstacles
+    function updateObstacles() {
+        // Faire disparaître progressivement les obstacles existants
+        gameState.obstacles.forEach(obstacle => {
+            obstacle.appearing = false;
+            obstacle.transitionStart = Date.now();
+        });
+
+        // Créer de nouveaux obstacles
+        const newObstacleCount = Math.floor(Math.random() * 5) + 5;
+        for (let i = 0; i < newObstacleCount; i++) {
+            let x, y, validPosition;
+            do {
+                x = Math.random() * config.mapSize;
+                y = Math.random() * config.mapSize;
+                validPosition = Math.sqrt(
+                    Math.pow(x - gameState.queenPosition.x, 2) + 
+                    Math.pow(y - gameState.queenPosition.y, 2)
+                ) > config.nestRadius + 30;
+            } while (!validPosition);
+
+            gameState.obstacles.push(new Obstacle(x, y, 20 + Math.random() * 20));
+        }
+    }
+
+    // Gestion de la population
+    function updatePopulation() {
+        // Consommation de nourriture
+        const consumption = gameState.ants.length * config.foodConsumptionRate;
+        gameState.totalFood = Math.max(0, gameState.totalFood - consumption);
+
+        // Mortalité
+        let baseMortalityRate = config.baseMortalityRate;
+        
+        // Température extrême
+        if (gameState.temperature > 35 || gameState.temperature < 0) {
+            baseMortalityRate *= 1.5;
+        }
+        
+        // Famine
+        if (gameState.totalFood <= 0) {
+            baseMortalityRate *= 2;
+        }
+
+        gameState.ants = gameState.ants.filter(ant => {
+            const inNest = ant.distanceToNest() < config.nestRadius;
+            let mortalityRate = inNest ? baseMortalityRate * 0.5 : baseMortalityRate;
+            
+            const dies = Math.random() < mortalityRate || 
+                        (ant.age > 5000 && ant.type !== "queen");
+            
+            if (dies && ant.type !== "queen") {
+                addEffect(ant.x, ant.y, "†", "combat");
+            }
+            
+            return !dies || (ant.type === "queen" && 
+                           gameState.ants.filter(a => a.type === "queen").indexOf(ant) < gameState.requiredQueens);
+        });
+    }
+
+    // Gestion des prédateurs
+    function updatePredators() {
+        // Faire apparaître de nouveaux prédateurs
+        if (gameState.predators.length < config.maxPredators && Math.random() < 0.001) {
+            let x, y;
+            if (Math.random() < 0.5) {
+                x = Math.random() < 0.5 ? 0 : config.mapSize;
+                y = Math.random() * config.mapSize;
+            } else {
+                x = Math.random() * config.mapSize;
+                y = Math.random() < 0.5 ? 0 : config.mapSize;
+            }
+            gameState.predators.push(new Predator(x, y));
+        }
+
+        gameState.predators.forEach(predator => predator.update());
+    }
+
+    // Génération de nourriture
+    function spawnFood() {
+        const spawnRate = {
+            "Été": 0.05,
+            "Printemps": 0.04,
+            "Automne": 0.03,
+            "Hiver": 0.01
+        }[seasons[gameState.seasonIndex]];
+
+        if (Math.random() < spawnRate && gameState.foods.length < 30) {
+            let x, y, validPosition;
+            do {
+                x = Math.random() * config.mapSize;
+                y = Math.random() * config.mapSize;
+                validPosition = Math.sqrt(
+                    Math.pow(x - gameState.queenPosition.x, 2) + 
+                    Math.pow(y - gameState.queenPosition.y, 2)
+                ) > config.nestRadius && !checkCollision(x, y);
+            } while (!validPosition);
+
+            gameState.foods.push(new Food(x, y));
+        }
+    }
+
+    // Dessin de la zone du nid
+    function drawNest(ctx) {
+        ctx.beginPath();
+        ctx.arc(
+            gameState.queenPosition.x,
+            gameState.queenPosition.y,
+            config.nestRadius,
+            0,
+            Math.PI * 2
+        );
+        ctx.strokeStyle = gameState.seasonColors[seasons[gameState.seasonIndex]].accent;
+        ctx.setLineDash([5, 5]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+    }
+
+    // Boucle principale du jeu
+    function gameLoop() {
+        // Couleur de fond selon la saison
+        const seasonColor = gameState.seasonColors[seasons[gameState.seasonIndex]];
+        ctx.fillStyle = seasonColor.ground;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // Mise à jour et dessin des obstacles
+        gameState.obstacles = gameState.obstacles.filter(obstacle => {
+            const stillExists = obstacle.update();
+            if (stillExists) obstacle.draw(ctx);
+            return stillExists;
+        });
+
+        // Dessiner la zone du nid
+        drawNest(ctx);
+
+        // Mise à jour et dessin des éléments
+        gameState.foods.forEach(food => food.draw(ctx));
+        gameState.ants.forEach(ant => {
+            ant.update();
+            ant.draw(ctx);
+        });
+        gameState.predators.forEach(predator => predator.draw(ctx));
+
+        // Mise à jour du jeu
+        updateTimeAndSeason();
+        updatePopulation();
+        updatePredators();
+        spawnFood();
+        updateStats();
+
+        requestAnimationFrame(gameLoop);
+    }
+
+    // Initialisation du jeu
+    function initGame() {
+        gameState.lastTimeUpdate = Date.now();
+        gameState.lastTempUpdate = Date.now();
+        
+        // Créer la reine au centre
+        gameState.ants.push(new Ant(
+            config.mapSize / 2,
+            config.mapSize / 2,
+            "queen"
+        ));
+
+        // Créer les fourmis initiales
+        for (let i = 0; i < 7; i++) {
+            gameState.ants.push(new Ant(
+                config.mapSize / 2 + (Math.random() * 40 - 20),
+                config.mapSize / 2 + (Math.random() * 40 - 20),
+                i < 3 ? "warrior" : "worker"
+            ));
+        }
+
+        // Créer la nourriture initiale
+        for (let i = 0; i < 15; i++) {
+            const angle = Math.random() * Math.PI * 2;
+            const distance = config.nestRadius + 50 + Math.random() * 100;
+            const x = config.mapSize / 2 + Math.cos(angle) * distance;
+            const y = config.mapSize / 2 + Math.sin(angle) * distance;
+            gameState.foods.push(new Food(x, y));
+        }
+
+        // Créer les obstacles initiaux
+        updateObstacles();
+
+        // Démarrer le jeu
+        gameLoop();
+    }
+
+    // Lancer le jeu
+    initGame();
+</script>
+</html>
+
